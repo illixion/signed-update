@@ -1,11 +1,11 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result, fail};
 use crate::manifest::Manifest;
+use crate::net::Net;
 use crate::source::{Config, Source};
 use crate::version::is_newer;
 
@@ -29,20 +29,11 @@ pub struct Update {
     /// The signed manifest and its signature as served, for a helper that checks them again.
     pub manifest: Vec<u8>,
     pub signature: String,
-    user_agent: String,
+    net: Net,
 }
 
-fn client(user_agent: &str) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .user_agent(user_agent)
-        .connect_timeout(Duration::from_secs(10))
-        .read_timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| Error::new(e.to_string()))
-}
-
-async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
-    let mut response = client.get(url).send().await.map_err(|e| format!("can't reach {url}: {e}"))?;
+async fn fetch(net: &Net, url: &str) -> Result<Vec<u8>> {
+    let mut response = net.get(url).await?;
     if !response.status().is_success() {
         fail!("{url}: {}", response.status());
     }
@@ -57,9 +48,9 @@ async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
 }
 
 /// What one source says about its newest release: the verified manifest, as served.
-async fn newest(client: &reqwest::Client, config: &Config, source: &Source) -> Result<(Manifest, Vec<u8>, String)> {
-    let sums = fetch(client, &source.latest_url("SHA256SUMS")).await?;
-    let signature = fetch(client, &source.latest_url("SHA256SUMS.sig")).await?;
+async fn newest(net: &Net, config: &Config, source: &Source) -> Result<(Manifest, Vec<u8>, String)> {
+    let sums = fetch(net, &source.latest_url("SHA256SUMS")).await?;
+    let signature = fetch(net, &source.latest_url("SHA256SUMS.sig")).await?;
     let signature = String::from_utf8_lossy(&signature).into_owned();
     let manifest = Manifest::verify(&sums, &signature, &config.namespace, &config.signers, &config.product)?;
     Ok((manifest, sums, signature))
@@ -76,11 +67,11 @@ pub async fn check(config: &Config, current: &str, pattern: &str) -> Result<Opti
     if config.sources.is_empty() {
         fail!("no release source is configured");
     }
-    let client = client(&config.user_agent)?;
+    let net = Net::new(config)?;
     let mut failures = Vec::new();
     for source in &config.sources {
         let attempt = async {
-            let (manifest, sums, signature) = newest(&client, config, source).await?;
+            let (manifest, sums, signature) = newest(&net, config, source).await?;
             let Some((version, name)) = manifest.find(pattern)? else {
                 return Ok(None);
             };
@@ -97,7 +88,7 @@ pub async fn check(config: &Config, current: &str, pattern: &str) -> Result<Opti
                 urls,
                 manifest: sums,
                 signature,
-                user_agent: config.user_agent.clone(),
+                net: net.clone(),
             }))
         };
         match attempt.await {
@@ -119,12 +110,11 @@ impl Update {
             fail!("bad asset name {}", self.name);
         }
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let client = client(&self.user_agent)?;
         let target = dir.join(&self.name);
         let partial = dir.join(format!("{}.partial", self.name));
         let mut failures = Vec::new();
         for url in &self.urls {
-            match download_one(&client, url, &partial, &self.sha256, &progress).await {
+            match download_one(&self.net, url, &partial, &self.sha256, &progress).await {
                 Ok(()) => {
                     let _ = std::fs::remove_file(&target);
                     std::fs::rename(&partial, &target).map_err(|e| e.to_string())?;
@@ -141,8 +131,8 @@ impl Update {
     }
 }
 
-async fn download_one(client: &reqwest::Client, url: &str, path: &Path, expected: &str, progress: &impl Fn(u64)) -> Result<()> {
-    let mut response = client.get(url).send().await.map_err(|e| e.to_string())?;
+async fn download_one(net: &Net, url: &str, path: &Path, expected: &str, progress: &impl Fn(u64)) -> Result<()> {
+    let mut response = net.get(url).await?;
     if !response.status().is_success() {
         fail!("{}", response.status());
     }

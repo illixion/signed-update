@@ -51,6 +51,31 @@ update: they already ask the front door first. If the front door is down, the ap
    `SHA256SUMS.sig` and publishes. `--key-file` signs with the offline backup instead.
 3. Apps find it at their next check.
 
+## Privacy: not showing apps.illixion.com to a network
+
+`Config::privacy(Privacy::Ech)` (feature `ech`) reaches a *concealed* source, `Source::apps`, only
+over DNS-over-HTTPS and Encrypted Client Hello, so on a hotel or office network a log shows neither
+the lookup nor the name. github.com stays ordinary: it identifies no one on its own.
+
+1. The HTTPS record of `apps.illixion.com` (its ECH config and address hints) is read from
+   `https://1.1.1.1/dns-query`, then `1.0.0.1`, **by IP**: reaching a resolver by IP sends no name,
+   and the system's DNS is never asked. Cloudflare is already the CDN, so no new party learns it.
+2. The connection goes to those addresses with ECH enforced (rustls fails a handshake the server
+   doesn't accept instead of carrying on in the clear). The network sees a handshake naming
+   Cloudflare's shared `cloudflare-ech.com`.
+3. The redirect to GitHub is followed by the ordinary client: each hop picks its own connection.
+4. If the resolver, the ECH config or the handshake is blocked, the source is **skipped, never reached
+   in the clear**, and the next source (GitHub directly) is asked. Without the `ech` feature a
+   concealed source is skipped the same way.
+
+What a log still shows: a connection to 1.1.1.1 (no name), a TLS handshake naming `cloudflare-ech.com`,
+and github.com. Tested on the wire (`cargo test --features ech -- --ignored`): a proxy between the client
+and Cloudflare captures the first flight of the handshake, which contains `cloudflare-ech.com` and not
+`illixion`, while the same proxy shows an ordinary client's `apps.illixion.com`.
+
+`ech` compiles rustls's aws-lc-rs provider (C code; ring has no HPKE), so each shipped target has to be
+built and tried.
+
 ## File names
 
 `<Product>-<version>-<platform…>`: `Vergence-0.2.0-macos-universal.zip`. The version sits between

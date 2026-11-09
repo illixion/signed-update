@@ -31,10 +31,16 @@ mod version;
 
 #[cfg(feature = "http")]
 mod check;
+#[cfg(feature = "ech")]
+mod dns;
+#[cfg(feature = "ech")]
+mod ech;
+#[cfg(feature = "http")]
+mod net;
 
 pub use error::{Error, Result};
 pub use manifest::{Manifest, parse_sums};
-pub use source::{Config, Source};
+pub use source::{Config, Privacy, Source};
 pub use sshsig::{signer_keys, verify_sshsig};
 pub use version::is_newer;
 
