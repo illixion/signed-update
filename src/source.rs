@@ -47,10 +47,12 @@ impl Source {
         Self::new(format!("{base}/{app}/latest/"), format!("{base}/{app}/releases/{{version}}/"))
     }
 
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     pub(crate) fn latest_url(&self, name: &str) -> String {
         format!("{}{name}", self.latest)
     }
 
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     pub(crate) fn file_url(&self, version: &str, name: &str) -> String {
         format!("{}{name}", self.files.replace("{version}", version))
     }
