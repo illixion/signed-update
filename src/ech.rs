@@ -44,6 +44,10 @@ fn build(host: &str, list: Vec<u8>, addrs: &[std::net::IpAddr], user_agent: &str
     let addrs: Vec<SocketAddr> = addrs.iter().map(|ip| SocketAddr::new(*ip, 443)).collect();
     reqwest::Client::builder()
         .use_preconfigured_tls(tls)
+        // A proxy would be told the name in its CONNECT, and would look it up itself; plain http
+        // would put it in the Host header in the clear.
+        .no_proxy()
+        .https_only(true)
         .resolve_to_addrs(host, &addrs)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(user_agent)

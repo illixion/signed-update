@@ -1,5 +1,6 @@
 //! The update protocol end to end against a local server that redirects, 404s and lies, with
 //! manifests signed by a real `ssh-keygen` (the tests skip where there is none).
+#![cfg(feature = "http")]
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -224,4 +225,27 @@ async fn a_tampered_download_is_refused_and_another_copy_used() {
 async fn no_sources_is_an_error() {
     let signer = signer_or_skip!();
     assert!(check(&config(&signer, &[]), "1.0.0", PATTERN).await.is_err());
+}
+
+/// What ssh-keygen -Y verify refuses is refused here too: bytes after the signature field, and a
+/// key pinned with options this crate doesn't enforce (`namespaces=` would limit it to others).
+#[test]
+fn trailing_data_and_pinning_options_are_refused() {
+    use base64::prelude::*;
+    let signer = signer_or_skip!();
+    let sums = format!("{}  Prod-1.2.0-macos.zip\n", sha(b"x"));
+    let armored = signer.sign(sums.as_bytes(), NAMESPACE);
+    assert!(signed_update::verify_sshsig(sums.as_bytes(), &armored, NAMESPACE, &signer.signers()).is_ok());
+
+    let body: String = armored.lines().filter(|l| !l.starts_with("-----")).collect();
+    let mut blob = BASE64_STANDARD.decode(body).unwrap();
+    blob.extend_from_slice(b"extra");
+    let padded = format!("-----BEGIN SSH SIGNATURE-----\n{}\n-----END SSH SIGNATURE-----\n", BASE64_STANDARD.encode(blob));
+    let error = signed_update::verify_sshsig(sums.as_bytes(), &padded, NAMESPACE, &signer.signers()).unwrap_err().to_string();
+    assert!(error.contains("trailing"), "{error}");
+
+    let key = signer.signers().split_once(' ').unwrap().1.to_string();
+    let limited = format!("releases@test namespaces=\"file\" {key}");
+    assert!(signed_update::signer_keys(&limited).is_empty(), "a key with options pins nothing");
+    assert!(signed_update::verify_sshsig(sums.as_bytes(), &armored, NAMESPACE, &limited).is_err());
 }

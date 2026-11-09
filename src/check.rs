@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -13,6 +14,14 @@ use crate::version::is_newer;
 const MAX_ASSET_BYTES: u64 = 2 << 30;
 /// A manifest and a signature are small; anything bigger isn't one.
 const MAX_METADATA_BYTES: usize = 1 << 20;
+/// All of one manifest or signature request, redirects and body included. Per-read timeouts alone
+/// let a host that sends a byte every few seconds hold a check (and the next source) forever.
+const METADATA_DEADLINE: Duration = Duration::from_secs(30);
+/// Until a download's response headers arrive, redirects included.
+const DOWNLOAD_START_DEADLINE: Duration = Duration::from_secs(60);
+/// A download slower than this over a whole window is a stalled one, and the next copy is tried.
+const MIN_DOWNLOAD_BYTES_PER_WINDOW: u64 = 64 << 10;
+const DOWNLOAD_WINDOW: Duration = Duration::from_secs(60);
 
 /// A newer release whose signed manifest checked out, and the file of it for this platform.
 #[derive(Debug, Clone)]
@@ -33,6 +42,13 @@ pub struct Update {
 }
 
 async fn fetch(net: &Net, url: &str) -> Result<Vec<u8>> {
+    match tokio::time::timeout(METADATA_DEADLINE, fetch_body(net, url)).await {
+        Ok(result) => result,
+        Err(_) => fail!("{url}: no complete answer in {}s", METADATA_DEADLINE.as_secs()),
+    }
+}
+
+async fn fetch_body(net: &Net, url: &str) -> Result<Vec<u8>> {
     let mut response = net.get(url).await?;
     if !response.status().is_success() {
         fail!("{url}: {}", response.status());
@@ -103,6 +119,13 @@ pub async fn check(config: &Config, current: &str, pattern: &str) -> Result<Opti
 }
 
 impl Update {
+    /// Changes how the download reaches the sources, for a setting changed since the check: the
+    /// [`Privacy`](crate::Privacy) the check ran with is otherwise used.
+    pub fn with_privacy(mut self, privacy: crate::Privacy) -> Self {
+        self.net.set_privacy(privacy);
+        self
+    }
+
     /// Downloads the file into `dir`, trying each source's copy in turn, and returns its path only
     /// when the SHA-256 is the signed one. `progress` gets the bytes received so far.
     pub async fn download(&self, dir: &Path, progress: impl Fn(u64)) -> Result<PathBuf> {
@@ -132,15 +155,26 @@ impl Update {
 }
 
 async fn download_one(net: &Net, url: &str, path: &Path, expected: &str, progress: &impl Fn(u64)) -> Result<()> {
-    let mut response = net.get(url).await?;
+    let mut response = match tokio::time::timeout(DOWNLOAD_START_DEADLINE, net.get(url)).await {
+        Ok(response) => response?,
+        Err(_) => fail!("no answer in {}s", DOWNLOAD_START_DEADLINE.as_secs()),
+    };
     if !response.status().is_success() {
         fail!("{}", response.status());
     }
     let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut hash = Sha256::new();
     let mut received = 0u64;
+    let (mut window_start, mut window_bytes) = (Instant::now(), 0u64);
     while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
         received += chunk.len() as u64;
+        window_bytes += chunk.len() as u64;
+        if window_start.elapsed() >= DOWNLOAD_WINDOW {
+            if window_bytes < MIN_DOWNLOAD_BYTES_PER_WINDOW {
+                fail!("stalled: {window_bytes} bytes in {}s", window_start.elapsed().as_secs());
+            }
+            (window_start, window_bytes) = (Instant::now(), 0);
+        }
         if received > MAX_ASSET_BYTES {
             fail!("sent more than {MAX_ASSET_BYTES} bytes");
         }

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::error::{Error, Result, fail};
-use crate::source::{Config, Privacy};
+use crate::source::{Config, Privacy, normal_host};
 
 const MAX_REDIRECTS: usize = 6;
 
@@ -17,7 +17,7 @@ pub(crate) struct Net {
     user_agent: String,
     privacy: Privacy,
     doh: Vec<String>,
-    /// Hosts that [`Privacy::Ech`] reaches only privately.
+    /// Hosts that [`Privacy::Ech`] reaches only privately, normalised ([`normal_host`]).
     concealed: Vec<String>,
     plain: reqwest::Client,
     /// Private clients by host, so a check's three requests share one lookup.
@@ -43,10 +43,19 @@ impl Net {
         })
     }
 
-    /// `destination` is the host and any explicit port, which is what the concealed list holds.
-    async fn client_for(&self, host: &str, destination: &str) -> Result<reqwest::Client> {
-        if self.privacy != Privacy::Ech || !self.concealed.iter().any(|h| h == destination) {
+    pub(crate) fn set_privacy(&mut self, privacy: Privacy) {
+        self.privacy = privacy;
+    }
+
+    /// The client for `url`: the private one for a concealed host under [`Privacy::Ech`], whatever
+    /// its port or spelling (`host` is normalised), and only over https, since a plain-http request
+    /// would carry the name in the clear however it was routed.
+    async fn client_for(&self, url: &reqwest::Url, host: &str) -> Result<reqwest::Client> {
+        if self.privacy != Privacy::Ech || !self.concealed.iter().any(|h| h == host) {
             return Ok(self.plain.clone());
+        }
+        if url.scheme() != "https" {
+            fail!("can only be reached privately, and {} isn't https", url.scheme());
         }
         if let Some(client) = self.private.lock().unwrap().get(host) {
             return Ok(client.clone());
@@ -61,12 +70,8 @@ impl Net {
     pub(crate) async fn get(&self, url: &str) -> Result<reqwest::Response> {
         let mut url = reqwest::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
         for _ in 0..MAX_REDIRECTS {
-            let host = url.host_str().ok_or_else(|| format!("{url} has no host"))?.to_ascii_lowercase();
-            let destination = match url.port() {
-                Some(port) => format!("{host}:{port}"),
-                None => host.clone(),
-            };
-            let client = self.client_for(&host, &destination).await.map_err(|e| format!("{host}: {e}"))?;
+            let host = normal_host(url.host_str().ok_or_else(|| format!("{url} has no host"))?);
+            let client = self.client_for(&url, &host).await.map_err(|e| format!("{host}: {e}"))?;
             let response = client.get(url.clone()).send().await.map_err(|e| format!("can't reach {host}: {e}"))?;
             if response.status().is_redirection() {
                 let to = response

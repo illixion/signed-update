@@ -5,8 +5,9 @@
 # signed (SSHSIG, `ssh-keygen -Y sign`), and the manifest and its signature are attached back.
 # An app accepts a release only when that signature checks out against the keys compiled into it.
 #
-#   bless-release.sh --repo OWNER/REPO --namespace NS --signers FILE [--tag TAG] [--publish]
-#                    [--signer X | --key-file F] [--gpg-agent] [--dry-run]
+#   bless-release.sh --repo OWNER/REPO --namespace NS --signers FILE [--product NAME] [--tag TAG]
+#                    [--publish] [--no-attestations] [--signer X | --key-file F] [--gpg-agent]
+#                    [--dry-run]
 #   bless-release.sh --namespace NS --signers FILE --manifest SHA256SUMS [key options]
 #
 # Release mode reads the GitHub release TAG (the newest one, drafts included, when --tag is left
@@ -15,6 +16,13 @@
 # then publishes a draft: GitHub's `releases/latest` (which apps.illixion.com redirects to, and the
 # updater asks for) only ever names a published release, so a draft isn't offered to anyone yet.
 # CI builds the files into a draft release; this is the step that needs you and your key.
+#
+# Before signing, release mode refuses what every app would refuse after it: with --product NAME
+# (the app's Config::new product, `Vergence`), a tag other than v<version>, or a file that isn't
+# NAME-…, or doesn't carry that version (`Vergence-0.2.0-macos-universal.zip`). A stray upload then
+# stops here instead of publishing a release no app accepts. And each file's build provenance is
+# checked (`gh attestation verify`): this is the human gate over whatever CI, or anyone holding a
+# token, put on the draft. --no-attestations skips that, for a release built by hand.
 #
 # Manifest mode signs a SHA256SUMS you already have, writing SHA256SUMS.sig beside it.
 #
@@ -37,6 +45,8 @@ NAMESPACE=""
 SIGNERS=""
 TAG=""
 MANIFEST_FILE=""
+PRODUCT=""
+ATTESTATIONS=1
 PUBLISH=0
 DRY_RUN=0
 SIGNER=""
@@ -50,12 +60,14 @@ while [[ $# -gt 0 ]]; do
     --signers)   SIGNERS="${2:?--signers needs a file}"; shift ;;
     --tag)       TAG="${2:?--tag needs a value}"; shift ;;
     --manifest)  MANIFEST_FILE="${2:?--manifest needs a file}"; shift ;;
+    --product)   PRODUCT="${2:?--product needs a name}"; shift ;;
+    --no-attestations) ATTESTATIONS=0 ;;
     --publish)   PUBLISH=1 ;;
     --signer)    SIGNER="${2:?--signer needs a value}"; shift ;;
     --key-file)  KEY_FILE="${2:?--key-file needs a value}"; shift ;;
     --gpg-agent) USE_GPG_AGENT=1 ;;
     --dry-run)   DRY_RUN=1 ;;
-    -h|--help)   sed -n '3,38p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)   sed -n '3,46p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -74,6 +86,8 @@ pick_signer() {
   local want="$1" n=0 principal algo b64 comment
   while read -r principal algo b64 comment; do
     [[ -z "${algo:-}" || "$principal" == \#* ]] && continue
+    # A line with options (namespaces=…) pins nothing in the apps either.
+    [[ "$algo" == ssh-* || "$algo" == sk-* ]] || continue
     n=$((n + 1))
     if [[ -z "$want" && "$n" == 1 ]] || [[ "$want" == "$n" ]] \
        || { [[ -n "$want" ]] && [[ "$comment" == *"$want"* ]]; }; then
@@ -170,6 +184,22 @@ for name in "${ASSET_NAMES[@]+"${ASSET_NAMES[@]}"}"; do
 done
 [[ ${#COVERED[@]} -gt 0 ]] || { echo "error: $TAG has no files to sign" >&2; exit 1; }
 
+# What the apps check after the signature, checked before it (the version is bound to the file
+# names, and the download URLs are built from it as v<version>).
+if [[ -n "$PRODUCT" ]]; then
+  VERSION="${TAG#v}"
+  [[ "$TAG" == "v$VERSION" && "$VERSION" =~ ^[0-9]+(\.[0-9]+)+$ ]] \
+    || { echo "error: the tag $TAG isn't v<version>; apps download release files from v<version>" >&2; exit 1; }
+  bad=0
+  for name in "${COVERED[@]}"; do
+    if [[ "$name" != "$PRODUCT-"* ]] || [[ "$name" != *"-$VERSION-"* && "$name" != *"-$VERSION."* ]]; then
+      echo "error: $name isn't a $PRODUCT $VERSION file (apps refuse a manifest that lists it); remove it from $TAG" >&2
+      bad=1
+    fi
+  done
+  [[ "$bad" == 0 ]] || exit 1
+fi
+
 # Blessed before? Say what moved: "3 new files" is the difference between a late arrival and
 # someone else having uploaded something.
 if printf '%s\n' "${ASSET_NAMES[@]}" | grep -qx "$MANIFEST"; then
@@ -188,6 +218,15 @@ mkdir -p "$STAGE/files"
 for name in "${COVERED[@]}"; do
   gh release download "$TAG" -R "$REPO" --pattern "$name" --dir "$STAGE/files" --clobber
 done
+
+if [[ "$ATTESTATIONS" == 1 ]]; then
+  echo "==> checking each file's build provenance"
+  for name in "${COVERED[@]}"; do
+    gh attestation verify "$STAGE/files/$name" -R "$REPO" >/dev/null \
+      || { echo "error: $name has no valid attestation from $REPO's workflows (--no-attestations for a hand-built release)" >&2; exit 1; }
+    echo "    $name"
+  done
+fi
 
 # Hashed from inside the folder so the manifest carries bare names, which is what the app matches
 # its file against; sorted for a stable, reviewable diff between blessings.

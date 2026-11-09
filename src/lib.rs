@@ -8,6 +8,7 @@
 //! A source that is down costs nothing; one that lies is refused. See `docs/PROTOCOL.md`.
 //!
 //! ```no_run
+//! # #[cfg(feature = "http")]
 //! # async fn demo() -> signed_update::Result<()> {
 //! use signed_update::{Config, Source, check};
 //! let config = Config::new("Vergence", "vergence-release", include_str!("../release-signers"))

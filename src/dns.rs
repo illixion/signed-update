@@ -149,6 +149,8 @@ async fn ask(client: &reqwest::Client, endpoint: &str, name: &str, rtype: u16) -
 pub(crate) async fn lookup(host: &str, endpoints: &[String], user_agent: &str) -> Result<Https> {
     let client = reqwest::Client::builder()
         .user_agent(user_agent)
+        // Straight to the resolver's IP: a proxy from the environment would see which name we ask.
+        .no_proxy()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(8))
         .build()

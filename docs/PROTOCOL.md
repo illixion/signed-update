@@ -14,11 +14,17 @@ without a new release and without trusting any host.
    version is read from that name, so it is signed too: a host can't relabel an old release as a
    new one. No such file in the release: no update.
 4. Not newer than the running version: no update (so a stale or replayed manifest can't downgrade).
+   Versions compare numerically (`0.10.0` > `0.9.2`); a release is newer than its own pre-release
+   (`0.3.0` > `0.3.0-beta.1`), and pre-releases of one version aren't ordered.
 5. Download the file from each source's copy in turn (`<files>/<name>`, `{version}` filled in), keep it
    only if its SHA-256 is the signed one, then install it.
 
-The first source whose manifest verifies decides; a source that is down, stale or lying costs a log
-line and the next source. A stale source can only make an update appear later.
+The first source whose manifest verifies decides; a source that is down or lying costs a log line and
+the next source. A stale source can hold an app on any genuine release newer than the one it runs
+(including one later found to be bad) until it is fixed, but never offer a downgrade or a forgery.
+Each manifest or signature request gets 30 seconds in all, redirects and body included, and a
+download is dropped for the next copy when it moves less than 64 KiB a minute, so a host that
+trickles bytes can't hold a check or a download forever.
 
 ## Where things are
 
@@ -48,7 +54,9 @@ update: they already ask the front door first. If the front door is down, the ap
 2. `scripts/bless-release.sh --repo OWNER/REPO --namespace <product>-release --signers release-signers
    --publish`, in the foreground (the hardware key wants a PIN and a touch). It hashes the draft's
    files, signs, checks the signature against the signers file, uploads `SHA256SUMS` and
-   `SHA256SUMS.sig` and publishes. `--key-file` signs with the offline backup instead.
+   `SHA256SUMS.sig` and publishes. `--key-file` signs with the offline backup instead. Before it signs
+   it checks each file's build attestation, and with `--product <Product>` that the tag is
+   `v<version>` and every file is `<Product>-<version>…`, which is what the apps require after it.
 3. Apps find it at their next check.
 
 ## Privacy: not showing apps.illixion.com to a network
@@ -67,6 +75,10 @@ the lookup nor the name. github.com stays ordinary: it identifies no one on its 
 4. If the resolver, the ECH config or the handshake is blocked, the source is **skipped, never reached
    in the clear**, and the next source (GitHub directly) is asked. Without the `ech` feature a
    concealed source is skipped the same way.
+5. A redirect back to the concealed host, from any hop, is held to the same rule however it spells
+   the host (case, a trailing dot, another port): only https, only privately. The private client
+   ignores proxies from the environment (a proxy is told the name in its `CONNECT`), and so does the
+   DNS-over-HTTPS client.
 
 What a log still shows: a connection to 1.1.1.1 (no name), a TLS handshake naming `cloudflare-ech.com`,
 and github.com. Tested on the wire (`cargo test --features ech -- --ignored`): a proxy between the client
@@ -87,7 +99,10 @@ version: a manifest naming two is refused.
 Two keys pinned from the first release that ships a `release-signers` file: the everyday hardware key
 and an offline backup. A backup added later would be worthless, since nothing installed would trust
 it. The namespace is per product, so a signature made for one app can't pass as another's.
-Each app compiles in its own `release-signers` (ssh-keygen's allowed_signers format).
+Each app compiles in its own `release-signers` (ssh-keygen's allowed_signers format), one
+`principal ssh-ed25519 <key>` per line. A line with options (`namespaces=`, `valid-before=`,
+`cert-authority`) pins nothing: those limits aren't implemented, and ignoring them would trust the
+key more widely than the file says.
 
 ## What this does not protect against
 

@@ -30,16 +30,16 @@ impl Source {
         self
     }
 
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     pub(crate) fn is_concealed(&self) -> bool {
         self.concealed
     }
 
-    /// The host, with its port when the URL names one (`apps.illixion.com`, `127.0.0.1:8080`): what
-    /// a request's destination is matched against.
-    #[cfg_attr(not(feature = "http"), allow(dead_code))]
+    /// The host, normalised as [`normal_host`] does: what a request's host is matched against. The
+    /// port is left out on purpose, so a redirect to another port of a concealed host is concealed too.
+    #[cfg(feature = "http")]
     pub(crate) fn host(&self) -> Option<String> {
-        let rest = self.latest.split_once("://")?.1;
-        Some(rest.split('/').next()?.to_ascii_lowercase())
+        reqwest::Url::parse(&self.latest).ok()?.host_str().map(normal_host)
     }
 
     /// GitHub Releases of `repo` ("illixion/vergence"), tagged `v<version>`. `latest` is GitHub's
@@ -77,6 +77,13 @@ impl Source {
     pub(crate) fn file_url(&self, version: &str, name: &str) -> String {
         format!("{}{name}", self.files.replace("{version}", version))
     }
+}
+
+/// A host name the way two spellings of it compare equal: lowercase, without the trailing dot of a
+/// fully qualified name (`APPS.illixion.com.` is apps.illixion.com, and must be concealed as one).
+#[cfg(feature = "http")]
+pub(crate) fn normal_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
 }
 
 fn slash(mut url: String) -> String {
@@ -178,8 +185,15 @@ mod tests {
         assert!(!Source::github("o/r").is_concealed());
         assert!(!Source::mirror("https://self.example", "x").is_concealed());
         assert!(Source::mirror("https://self.example", "x").concealed().is_concealed());
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn hosts_compare_without_case_port_or_trailing_dot() {
         assert_eq!(Source::apps("x").host().as_deref(), Some("apps.illixion.com"));
-        assert_eq!(Source::new("http://127.0.0.1:8080/a/", "http://127.0.0.1:8080/b/").host().as_deref(), Some("127.0.0.1:8080"));
+        assert_eq!(Source::new("http://127.0.0.1:8080/a/", "http://127.0.0.1:8080/b/").host().as_deref(), Some("127.0.0.1"));
+        assert_eq!(Source::mirror("https://APPS.illixion.com.", "x").host().as_deref(), Some("apps.illixion.com"));
+        assert_eq!(normal_host("Apps.Illixion.COM."), "apps.illixion.com");
     }
 
     #[test]
