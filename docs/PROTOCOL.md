@@ -88,6 +88,16 @@ and Cloudflare captures the first flight of the handshake, which contains `cloud
 `ech` compiles rustls's aws-lc-rs provider (C code; ring has no HPKE), so each shipped target has to be
 built and tried.
 
+## Connections
+
+Every request (DNS-over-HTTPS, ECH and ordinary) checks the server's certificate against the
+operating system's trust store, through rustls-platform-verifier, and no root list is compiled in. A
+CA the OS stops trusting (a distrust like eMudhra's, a revocation) stops working here with the OS's
+own update, not only after a new release built against a newer list. An app can pass its own
+verifier with `Config::verifier`, one that refuses CAs it knows intercept say, and it decides every
+connection a check makes, the resolver's included. Either way the certificate only decides who can
+see or block a check: what gets installed is what the signature says, whichever server sent it.
+
 ## File names
 
 `<Product>-<version>-<platform…>`: `Vergence-0.2.0-macos-universal.zip`. The version sits between
